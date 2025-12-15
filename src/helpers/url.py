@@ -1,5 +1,9 @@
+from io import BufferedReader
 import socket
 import ssl # for https, tls
+from typing import Dict
+
+open_sockets: Dict[tuple, tuple[socket.socket, BufferedReader]] = {}
 
 class URL:
 
@@ -55,6 +59,36 @@ class URL:
         
         self.path = "/" + url
 
+    def get_socket(self, host: str, port: int) -> tuple[socket.socket, BufferedReader]:
+        global open_sockets
+
+        key = (host, port)
+
+        if key in open_sockets:
+            return open_sockets[key]
+        
+        s = socket.socket(
+            # the socket family which tells how to find another computer
+            family=socket.AF_INET,
+            # type of socket which describes the conversation type that;s going to happen
+            type=socket.SOCK_STREAM, # can send arbitary amounts of data
+            # protocol, the steps by which the two computers will establish communincation
+            proto=socket.IPPROTO_TCP
+        )
+
+        # note it accepts tuple
+        s.connect((self.host, self.port))
+
+        if self.scheme == self.__SCHEME_HTTPS:
+            ctx = ssl.create_default_context()
+            # This library will handle the encrypting and connection to the correct host
+            s = ctx.wrap_socket(s, server_hostname=self.host)
+       
+        f = s.makefile("rb")
+
+        open_sockets[key] = (s, f)
+
+        return open_sockets[key]
     def request(self):
         # Handle scheme file differently
         if self.scheme == self.__SCHEME_FILE:
@@ -76,52 +110,52 @@ class URL:
             content = url.request()
             return content
         
-        s = socket.socket(
-            # the socket family which tells how to find another computer
-            family=socket.AF_INET,
-            # type of socket which describes the conversation type that;s going to happen
-            type=socket.SOCK_STREAM, # can send arbitary amounts of data
-            # protocol, the steps by which the two computers will establish communincation
-            proto=socket.IPPROTO_TCP
-        )
-
-        # note it accepts tuple
-        s.connect((self.host, self.port))
-
-        if self.scheme == self.__SCHEME_HTTPS:
-            ctx = ssl.create_default_context()
-            # This library will handle the encrypting and connection to the correct host
-            s = ctx.wrap_socket(s, server_hostname=self.host)
 
         # Now let's send some request to server
         # First add headers
         request = "GET {} {}\r\n".format(self.path, self.__HTTP_VERSION)
         request += self.__add_header("Host", self.host)
-        request += self.__add_header("Connection", "close")
+        request += self.__add_header("Connection", "keep-alive")
         request += self.__add_header("User-Agent", "mini-browser")
         request += self.__CRLF
 
-        s.send(request.encode("utf-8")) # send the data as bytes
+        s, response = self.get_socket(self.host, self.port)
+
+        try:
+            s.send(request.encode("utf-8")) # send the data as bytes
+        except BrokenPipeError as e:
+            del open_sockets[(self.host, self.port)]
+            return self.request()
 
         # reading the response from the server
-        response = s.makefile("r", encoding="utf8", newline="\r\n")
+        # response = s.makefile("rb", encoding="utf8", newline="\r\n")
 
         statusline = response.readline()
-        version, status, explanation = statusline.split(" ", 2)
+        version, status, explanation = statusline.split(b" ", 2)
 
         response_headers = {}
+
         while True:
             line = response.readline()
-            if line == "\r\n": break
-            header, value = line.split(":", 1)
-            response_headers[header.casefold()] = value.strip()
+            if line == b"\r\n": break
+            header, value = line.split(b":", 1)
+            response_headers[header.decode("utf-8").casefold()] = value.decode("utf-8").strip().casefold()
 
             assert "transfer-encoding" not in response_headers
             assert "content-encoding" not in response_headers
         
-        content = response.read()
-        s.close()
-        return content
+        assert "content-length" in response_headers
+
+        content_length = int(response_headers["content-length"])
+
+        # read only specified bytes
+        content = response.read(content_length)
+        print(response_headers["content-type"])
+        # delete the socket, if server sends connection: close
+        if not "connection" in response_headers or response_headers["connection"] == "close":
+            del open_sockets[(self.host, self.port)]
+
+        return self.decode_content(content, response_headers["content-type"])
     
     def __add_header(self, key: str, val: str):
         '''
@@ -129,6 +163,28 @@ class URL:
         '''
         return "{}: {}{}".format(key, val, self.__CRLF)
     
+    def decode_content(self, content: bytes, contentType: str):
+        if contentType.startswith("audio"):
+            # handle audio type
+            return "Content-Type: audio not implemented\n"
+        
+        if contentType.startswith("application"):
+            # handle application type
+            return "Content-Type: application not implemented\n"
+            
+        if contentType.startswith("image"):
+            return "Content-Type: image not implemented\n"
+
+        if contentType.startswith("multipart"):
+            return "Content-Type: multipart not implemented\n"
+            
+        if contentType.startswith("text"):
+            return content.decode("utf-8")
+
+        if contentType.startswith("video"):
+            return "Content-Type: video not implemented\n"
+        
+        return "Content-Type: application/vnd not implemented\n"
     def show(self, body: str):
         if self.scheme == self.__SCHEME_VIEW_SOURCE:
             print(body)

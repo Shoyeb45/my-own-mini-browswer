@@ -1,6 +1,6 @@
 from helpers.url import URL
 
-url = URL("data:text/html,&gt; &nbsp;")
+url = URL("https://shoyeb.vercel.app/")
 
 url.show(url.request())
 
